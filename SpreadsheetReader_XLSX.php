@@ -4,6 +4,7 @@
  *
  * @author Martins Pilsetnieks
  */
+
 	class SpreadsheetReader_XLSX implements Iterator, Countable
 	{
 		const CELL_TYPE_BOOL = 'b';
@@ -47,6 +48,10 @@
 		 * @var XMLReader XML reader object for the worksheet XML file
 		 */
 		private $Worksheet = false;
+        /**
+		 * @var array Relationships map for worksheet elements
+		 */
+		private $Relationships = array();
 
 		// Shared strings file
 		/**
@@ -67,7 +72,11 @@
 		 * @var SimpleXMLElement XML object for the workbook XML file
 		 */
 		private $WorkbookXML = false;
-
+        // Workbook relationship data
+		/**
+		 * @var SimpleXMLElement XML object for the workbook relationship XML file
+		 */
+		private $RelationshipXML = false;
 		// Style data
 		/**
 		 * @var SimpleXMLElement XML object for the styles XML file
@@ -90,9 +99,9 @@
 		private $Index = 0;
 
 		/**
-		 * @var array Data about separate sheets in the file
+		 * @var boolean If workbook sheets have not been mapped yet
 		 */
-		private $Sheets = false;
+		private $mappedSheets = false;
 
 		private $SharedStringCount = 0;
 		private $SharedStringIndex = 0;
@@ -228,12 +237,19 @@
 				$this -> WorkbookXML = new SimpleXMLElement($Zip -> getFromName('xl/workbook.xml'));
 			}
 
+            // Get relationship map
+            if ($Zip -> locateName('xl/_rels/workbook.xml.rels') !== false)
+            {
+                $this -> RelationshipXML = new SimpleXMLElement($Zip -> getFromName('xl/_rels/workbook.xml.rels'));
+                $this -> DetermineRelationships();
+            }
+
 			// Extracting the XMLs from the XLSX zip file
-			if ($Zip -> locateName('xl/sharedStrings.xml') !== false)
-			{
-				$this -> SharedStringsPath = $this -> TempDir.'xl'.DIRECTORY_SEPARATOR.'sharedStrings.xml';
-				$Zip -> extractTo($this -> TempDir, 'xl/sharedStrings.xml');
-				$this -> TempFiles[] = $this -> TempDir.'xl'.DIRECTORY_SEPARATOR.'sharedStrings.xml';
+            if (isset($this->Relationships['sharedStrings']) && $Zip->locateName('xl/' . $this->Relationships['sharedStrings']['target'])) {
+                // Read from relationship mapped file
+                $this -> SharedStringsPath = $this -> TempDir.'xl'.DS.$this->Relationships['sharedStrings']['target'];
+    			$Zip -> extractTo($this -> TempDir, 'xl/' . $this->Relationships['sharedStrings']['target']);
+    			$this -> TempFiles[] = $this -> TempDir.'xl'.DS.$this->Relationships['sharedStrings']['target'];
 
 				if (is_readable($this -> SharedStringsPath))
 				{
@@ -241,25 +257,27 @@
 					$this -> SharedStrings -> open($this -> SharedStringsPath);
 					$this -> PrepareSharedStringCache();
 				}
-			}
+            }
 
-			$Sheets = $this -> Sheets();
+			$Sheets = $this->Sheets();
 
-			foreach ($this -> Sheets as $Index => $Name)
-			{
-				if ($Zip -> locateName('xl/worksheets/sheet'.$Index.'.xml') !== false)
-				{
-					$Zip -> extractTo($this -> TempDir, 'xl/worksheets/sheet'.$Index.'.xml');
-					$this -> TempFiles[] = $this -> TempDir.'xl'.DIRECTORY_SEPARATOR.'worksheets'.DIRECTORY_SEPARATOR.'sheet'.$Index.'.xml';
-				}
-			}
+            if (isset($this->Relationships['worksheets'])) {
+    			foreach ($this->Relationships['worksheets'] as $Index => $sheet)
+    			{
+    				if ($Zip -> locateName('xl/' . $sheet['target']) !== false)
+    				{
+    					$Zip -> extractTo($this -> TempDir, 'xl/' . $sheet['target']);
+    					$this -> TempFiles[] = $this -> TempDir.'xl'. DS . str_replace('/', DS, $sheet['target']);
+    				}
+    			}
+            }
 
-			$this -> ChangeSheet(0);
+			$this->ChangeSheet(0);
 
 			// If worksheet is present and is OK, parse the styles already
-			if ($Zip -> locateName('xl/styles.xml') !== false)
+            if (isset($this->Relationships['styles']) && $Zip->locateName('xl/' . $this->Relationships['styles']['target']))
 			{
-				$this -> StylesXML = new SimpleXMLElement($Zip -> getFromName('xl/styles.xml'));
+				$this -> StylesXML = new SimpleXMLElement($Zip -> getFromName('xl/' . $this->Relationships['styles']['target']));
 				if ($this -> StylesXML && $this -> StylesXML -> cellXfs && $this -> StylesXML -> cellXfs -> xf)
 				{
 					foreach ($this -> StylesXML -> cellXfs -> xf as $Index => $XF)
@@ -278,7 +296,7 @@
 						}
 					}
 				}
-				
+
 				if ($this -> StylesXML -> numFmts && $this -> StylesXML -> numFmts -> numFmt)
 				{
 					foreach ($this -> StylesXML -> numFmts -> numFmt as $Index => $NumFmt)
@@ -358,6 +376,58 @@
 			}
 		}
 
+        /**
+		 * Retrieves the relationships map of a workbook, and formats an array pointing to sheets, styles and shared strings and stores it in a property.
+		 *
+		 * @return boolean True if successful, false otherwise
+		 */
+        public function DetermineRelationships()
+        {
+            if ($this->RelationshipXML !== false)
+            {
+                if (!isset($this->RelationshipXML->Relationship)) {
+                    return false;
+                }
+
+                foreach ($this->RelationshipXML->Relationship as $relationship) {
+                    // Determine type of relationship
+                    $attributes = $relationship->attributes();
+
+                    switch ($attributes['Type']) {
+                        case 'http://schemas.openxmlformats.org/officeDocument/2006/relationships/styles': // Styles
+                            if (!isset($this->Relationships['style'])) {
+                                $this->Relationships['style'] = [
+                                    'id' => (string) $attributes['Id'],
+                                    'target' => (string) $attributes['Target']
+                                ];
+                            }
+                            break;
+                        case 'http://schemas.openxmlformats.org/officeDocument/2006/relationships/worksheet': // Worksheets
+                            if (!isset($this->Relationships['worksheets'])) {
+                                $this->Relationships['worksheets'] = array();
+                            }
+                            $this->Relationships['worksheets'][str_replace('rId', '', (string) $attributes['Id'])] = [
+                                'id' => (string) $attributes['Id'],
+                                'target' => (string) $attributes['Target']
+                            ];
+                            break;
+                        case 'http://schemas.openxmlformats.org/officeDocument/2006/relationships/sharedStrings': // Shared strings
+                            if (!isset($this->Relationships['sharedStrings'])) {
+                                $this->Relationships['sharedStrings'] = [
+                                    'id' => (string) $attributes['Id'],
+                                    'target' => (string) $attributes['Target']
+                                ];
+                            }
+                            break;
+                    }
+                }
+
+                return true;
+            } else {
+                return false;
+            }
+        }
+
 		/**
 		 * Retrieves an array with information about sheets in the current file
 		 *
@@ -365,26 +435,23 @@
 		 */
 		public function Sheets()
 		{
-			if ($this -> Sheets === false)
-			{
-				$this -> Sheets = array();
-				foreach ($this -> WorkbookXML -> sheets -> sheet as $Index => $Sheet)
-				{
-					$Attributes = $Sheet -> attributes('r', true);
-					foreach ($Attributes as $Name => $Value)
-					{
-						if ($Name == 'id')
-						{
-							$SheetID = (int)str_replace('rId', '', (string)$Value);
-							break;
-						}
-					}
-
-					$this -> Sheets[$SheetID] = (string)$Sheet['name'];
+			if ($this->mappedSheets === false) {
+				foreach ($this->WorkbookXML->sheets->sheet as $i => $sheet) {
+					$attributes = $sheet->attributes('r', true);
+                    $id = (int) str_replace('rId', '', $attributes['id']);
+                    $this->Relationships['worksheets'][$id]['name'] = (string) $sheet['name'];
+                    $this->mappedSheets[] = $id;
 				}
-				ksort($this -> Sheets);
 			}
-			return array_values($this -> Sheets);
+
+            // Get ID => name map
+            $map = array();
+
+            foreach ($this->mappedSheets as $i) {
+                $map[] = $this->Relationships['worksheets'][$i]['name'];
+            }
+
+			return $map;
 		}
 
 		/**
@@ -394,25 +461,22 @@
 		 *
 		 * @return bool True if sheet was successfully changed, false otherwise.
 		 */
-		public function ChangeSheet($Index)
+		public function ChangeSheet($key)
 		{
-			$RealSheetIndex = false;
-			$Sheets = $this -> Sheets();
-			if (isset($Sheets[$Index]))
-			{
-				$SheetIndexes = array_keys($this -> Sheets);
-				$RealSheetIndex = $SheetIndexes[$Index];
-			}
+            if ($this->mappedSheets === false) {
+                $this->Sheets();
+            }
 
-			$TempWorksheetPath = $this -> TempDir.'xl/worksheets/sheet'.$RealSheetIndex.'.xml';
+			if (isset($this->Relationships['worksheets'][$this->mappedSheets[$key]])) {
+			    $TempWorksheetPath = $this -> TempDir. 'xl' . DS . $this->Relationships['worksheets'][$this->mappedSheets[$key]]['target'];
 
-			if ($RealSheetIndex !== false && is_readable($TempWorksheetPath))
-			{
-				$this -> WorksheetPath = $TempWorksheetPath;
-
-				$this -> rewind();
-				return true;
-			}
+    			if (is_readable($TempWorksheetPath))
+    			{
+    				$this -> WorksheetPath = $TempWorksheetPath;
+    				$this -> rewind();
+    				return true;
+    			}
+            }
 
 			return false;
 		}
@@ -549,7 +613,7 @@
 					else
 					{
 						$this -> SSOpen = true;
-	
+
 						if ($this -> SharedStringIndex < $Index)
 						{
 							$this -> SSOpen = false;
@@ -662,7 +726,7 @@
 				{
 					$Sections = explode(';', $Format['Code']);
 					$Format['Code'] = $Sections[0];
-	
+
 					switch (count($Sections))
 					{
 						case 2:
@@ -866,7 +930,7 @@
 						$AdjDecimalDivisor = $DecimalDivisor/$GCD;
 
 						if (
-							strpos($Format['Code'], '0') !== false || 
+							strpos($Format['Code'], '0') !== false ||
 							strpos($Format['Code'], '#') !== false ||
 							substr($Format['Code'], 0, 3) == '? ?'
 						)
@@ -913,7 +977,7 @@
 						$Value = preg_replace('', $Format['Currency'], $Value);
 					}
 				}
-				
+
 			}
 
 			return $Value;
@@ -937,10 +1001,10 @@
 		}
 
 		// !Iterator interface methods
-		/** 
+		/**
 		 * Rewind the Iterator to the first element.
 		 * Similar to the reset() function for arrays in PHP
-		 */ 
+		 */
 		public function rewind()
 		{
 			// Removed the check whether $this -> Index == 0 otherwise ChangeSheet doesn't work properly
@@ -980,10 +1044,10 @@
 			return $this -> CurrentRow;
 		}
 
-		/** 
-		 * Move forward to next element. 
-		 * Similar to the next() function for arrays in PHP 
-		 */ 
+		/**
+		 * Move forward to next element.
+		 * Similar to the next() function for arrays in PHP
+		 */
 		public function next()
 		{
 			$this -> Index++;
@@ -1117,23 +1181,23 @@
 			return $this -> CurrentRow;
 		}
 
-		/** 
+		/**
 		 * Return the identifying key of the current element.
 		 * Similar to the key() function for arrays in PHP
 		 *
 		 * @return mixed either an integer or a string
-		 */ 
+		 */
 		public function key()
 		{
 			return $this -> Index;
 		}
 
-		/** 
+		/**
 		 * Check if there is a current element after calls to rewind() or next().
 		 * Used to check if we've iterated to the end of the collection
 		 *
 		 * @return boolean FALSE if there's nothing more to iterate over
-		 */ 
+		 */
 		public function valid()
 		{
 			return $this -> Valid;
