@@ -99,9 +99,9 @@
 		private $Index = 0;
 
 		/**
-		 * @var array Data about separate sheets in the file
+		 * @var boolean If workbook sheets have not been mapped yet
 		 */
-		private $Sheets = false;
+		private $mappedSheets = false;
 
 		private $SharedStringCount = 0;
 		private $SharedStringIndex = 0;
@@ -245,9 +245,10 @@
             }
 
 			// Extracting the XMLs from the XLSX zip file
-            if (isset($this->Relationships['sharedStrings'])) {
+            if (isset($this->Relationships['sharedStrings']) && $Zip->locateName('xl/' . $this->Relationships['sharedStrings']['target'])) {
+                // Read from relationship mapped file
                 $this -> SharedStringsPath = $this -> TempDir.'xl'.DS.$this->Relationships['sharedStrings']['target'];
-    			$Zip -> extractTo($this -> TempDir, 'xl' . DS . $this->Relationships['sharedStrings']['target']);
+    			$Zip -> extractTo($this -> TempDir, 'xl/' . $this->Relationships['sharedStrings']['target']);
     			$this -> TempFiles[] = $this -> TempDir.'xl'.DS.$this->Relationships['sharedStrings']['target'];
 
 				if (is_readable($this -> SharedStringsPath))
@@ -256,36 +257,27 @@
 					$this -> SharedStrings -> open($this -> SharedStringsPath);
 					$this -> PrepareSharedStringCache();
 				}
-            } elseif ($Zip -> locateName('xl/sharedStrings.xml') !== false) {
-				$this -> SharedStringsPath = $this -> TempDir.'xl'.DIRECTORY_SEPARATOR.'sharedStrings.xml';
-				$Zip -> extractTo($this -> TempDir, 'xl/sharedStrings.xml');
-				$this -> TempFiles[] = $this -> TempDir.'xl'.DIRECTORY_SEPARATOR.'sharedStrings.xml';
+            }
 
-				if (is_readable($this -> SharedStringsPath))
-				{
-					$this -> SharedStrings = new XMLReader;
-					$this -> SharedStrings -> open($this -> SharedStringsPath);
-					$this -> PrepareSharedStringCache();
-				}
-			}
+			$Sheets = $this->Sheets();
 
-			$Sheets = $this -> Sheets();
+            if (isset($this->Relationships['worksheets'])) {
+    			foreach ($this->Relationships['worksheets'] as $Index => $sheet)
+    			{
+    				if ($Zip -> locateName('xl/' . $sheet['target']) !== false)
+    				{
+    					$Zip -> extractTo($this -> TempDir, 'xl/' . $sheet['target']);
+    					$this -> TempFiles[] = $this -> TempDir.'xl'. DS . str_replace('/', DS, $sheet['target']);
+    				}
+    			}
+            }
 
-			foreach ($this -> Sheets as $Index => $Name)
-			{
-				if ($Zip -> locateName('xl/worksheets/sheet'.$Index.'.xml') !== false)
-				{
-					$Zip -> extractTo($this -> TempDir, 'xl/worksheets/sheet'.$Index.'.xml');
-					$this -> TempFiles[] = $this -> TempDir.'xl'.DIRECTORY_SEPARATOR.'worksheets'.DIRECTORY_SEPARATOR.'sheet'.$Index.'.xml';
-				}
-			}
-
-			$this -> ChangeSheet(0);
+			$this->ChangeSheet(0);
 
 			// If worksheet is present and is OK, parse the styles already
-			if ($Zip -> locateName('xl/styles.xml') !== false)
+            if (isset($this->Relationships['styles']) && $Zip->locateName('xl/' . $this->Relationships['styles']['target']))
 			{
-				$this -> StylesXML = new SimpleXMLElement($Zip -> getFromName('xl/styles.xml'));
+				$this -> StylesXML = new SimpleXMLElement($Zip -> getFromName('xl/' . $this->Relationships['styles']['target']));
 				if ($this -> StylesXML && $this -> StylesXML -> cellXfs && $this -> StylesXML -> cellXfs -> xf)
 				{
 					foreach ($this -> StylesXML -> cellXfs -> xf as $Index => $XF)
@@ -405,8 +397,8 @@
                         case 'http://schemas.openxmlformats.org/officeDocument/2006/relationships/styles': // Styles
                             if (!isset($this->Relationships['style'])) {
                                 $this->Relationships['style'] = [
-                                    'id' => $attributes['Id'],
-                                    'target' => $attributes['Target']
+                                    'id' => (string) $attributes['Id'],
+                                    'target' => (string) $attributes['Target']
                                 ];
                             }
                             break;
@@ -414,16 +406,16 @@
                             if (!isset($this->Relationships['worksheets'])) {
                                 $this->Relationships['worksheets'] = array();
                             }
-                            $this->Relationships['worksheets'][] = [
-                                'id' => $attributes['Id'],
-                                'target' => $attributes['Target']
+                            $this->Relationships['worksheets'][str_replace('rId', '', (string) $attributes['Id'])] = [
+                                'id' => (string) $attributes['Id'],
+                                'target' => (string) $attributes['Target']
                             ];
                             break;
                         case 'http://schemas.openxmlformats.org/officeDocument/2006/relationships/sharedStrings': // Shared strings
                             if (!isset($this->Relationships['sharedStrings'])) {
                                 $this->Relationships['sharedStrings'] = [
-                                    'id' => $attributes['Id'],
-                                    'target' => $attributes['Target']
+                                    'id' => (string) $attributes['Id'],
+                                    'target' => (string) $attributes['Target']
                                 ];
                             }
                             break;
@@ -443,26 +435,22 @@
 		 */
 		public function Sheets()
 		{
-			if ($this -> Sheets === false)
-			{
-				$this -> Sheets = array();
-				foreach ($this -> WorkbookXML -> sheets -> sheet as $Index => $Sheet)
-				{
-					$Attributes = $Sheet -> attributes('r', true);
-					foreach ($Attributes as $Name => $Value)
-					{
-						if ($Name == 'id')
-						{
-							$SheetID = (int)str_replace('rId', '', (string)$Value);
-							break;
-						}
-					}
-
-					$this -> Sheets[$SheetID] = (string)$Sheet['name'];
+			if ($this->mappedSheets === false) {
+				foreach ($this->WorkbookXML->sheets->sheet as $i => $sheet) {
+					$attributes = $sheet->attributes('r', true);
+                    $id = (int) str_replace('rId', '', $attributes['id']);
+                    $this->Relationships['worksheets'][$id]['name'] = (string) $sheet['name'];
 				}
-				ksort($this -> Sheets);
 			}
-			return array_values($this -> Sheets);
+
+            // Get ID => name map
+            $map = array();
+
+            foreach ($this->Relationships['worksheets'] as $i => $sheet) {
+                $map[$i] = $sheet['name'];
+            }
+
+			return $map;
 		}
 
 		/**
@@ -472,25 +460,19 @@
 		 *
 		 * @return bool True if sheet was successfully changed, false otherwise.
 		 */
-		public function ChangeSheet($Index)
+		public function ChangeSheet($key)
 		{
-			$RealSheetIndex = false;
-			$Sheets = $this -> Sheets();
-			if (isset($Sheets[$Index]))
-			{
-				$SheetIndexes = array_keys($this -> Sheets);
-				$RealSheetIndex = $SheetIndexes[$Index];
-			}
+			if (isset($this->Relationships['worksheets'][$key])) {
+			    $TempWorksheetPath = $this -> TempDir. 'xl' . DS . $this->Relationships['worksheets'][$key]['target'];
 
-			$TempWorksheetPath = $this -> TempDir.'xl/worksheets/sheet'.$RealSheetIndex.'.xml';
+    			if (is_readable($TempWorksheetPath))
+    			{
+    				$this -> WorksheetPath = $TempWorksheetPath;
 
-			if ($RealSheetIndex !== false && is_readable($TempWorksheetPath))
-			{
-				$this -> WorksheetPath = $TempWorksheetPath;
-
-				$this -> rewind();
-				return true;
-			}
+    				$this -> rewind();
+    				return true;
+    			}
+            }
 
 			return false;
 		}
