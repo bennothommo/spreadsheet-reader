@@ -440,14 +440,15 @@
 					$attributes = $sheet->attributes('r', true);
                     $id = (int) str_replace('rId', '', $attributes['id']);
                     $this->Relationships['worksheets'][$id]['name'] = (string) $sheet['name'];
+                    $this->mappedSheets[] = $id;
 				}
 			}
 
             // Get ID => name map
             $map = array();
 
-            foreach ($this->Relationships['worksheets'] as $i => $sheet) {
-                $map[$i] = $sheet['name'];
+            foreach ($this->mappedSheets as $i) {
+                $map[] = $this->Relationships['worksheets'][$i]['name'];
             }
 
 			return $map;
@@ -462,13 +463,16 @@
 		 */
 		public function ChangeSheet($key)
 		{
-			if (isset($this->Relationships['worksheets'][$key])) {
-			    $TempWorksheetPath = $this -> TempDir. 'xl' . DS . $this->Relationships['worksheets'][$key]['target'];
+            if ($this->mappedSheets === false) {
+                $this->Sheets();
+            }
+
+			if (isset($this->Relationships['worksheets'][$this->mappedSheets[$key]])) {
+			    $TempWorksheetPath = $this -> TempDir. 'xl' . DS . $this->Relationships['worksheets'][$this->mappedSheets[$key]]['target'];
 
     			if (is_readable($TempWorksheetPath))
     			{
     				$this -> WorksheetPath = $TempWorksheetPath;
-
     				$this -> rewind();
     				return true;
     			}
