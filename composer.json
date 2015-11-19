@@ -12,11 +12,6 @@
 			"name": "Martins Pilsetnieks",
 			"email": "pilsetnieks@gmail.com",
 			"homepage": "http://www.nuovo.lv/"
-		},
-		{
-			"name": "Ben Thomson",
-			"email": "contact@alfreido.com",
-			"homepage": "http://github.com/bennothommo"
 		}
 	],
 	"require": {
